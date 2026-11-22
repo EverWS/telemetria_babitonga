@@ -79,5 +79,30 @@ class ReceiverContractTests(unittest.TestCase):
         # LoRa packets are limited to 255 bytes: 10 bytes of framing + payload.
         self.assertLessEqual(10 + 244, 255)
 
+
+    def test_lora_link_parameters_are_pinned_and_identical(self):
+        """ADR-007: SF7/BW125/CR4-5/17 dBm/915,0 MHz fixados nos dois rádios."""
+        import math
+        import re
+        names = ("BAND", "SPREADING_FACTOR", "SIGNAL_BANDWIDTH", "CODING_RATE_DENOMINATOR",
+                 "TX_POWER_DBM", "PREAMBLE_SYMBOLS", "SYNC_WORD")
+        values = {}
+        for folder in ("TransmiterLoRa", "ReceiverLoRa"):
+            radio = (ROOT.parent / folder / "Radio.h").read_text(encoding="utf-8")
+            values[folder] = {name: re.search(rf"{name} = ([0-9xA-Fa-fEe.]+);", radio).group(1) for name in names}
+            for call in ("setSpreadingFactor(SPREADING_FACTOR)", "setSignalBandwidth(SIGNAL_BANDWIDTH)",
+                         "setCodingRate4(CODING_RATE_DENOMINATOR)", "setTxPower(TX_POWER_DBM",
+                         "disableLowDataRate()", "enableCrc()"):
+                self.assertIn(call, radio, folder)
+        self.assertEqual(values["TransmiterLoRa"], values["ReceiverLoRa"])
+        v = values["TransmiterLoRa"]
+        self.assertEqual((v["BAND"], v["SPREADING_FACTOR"], v["SIGNAL_BANDWIDTH"]), ("915e6", "7", "125E3"))
+        self.assertEqual((v["CODING_RATE_DENOMINATOR"], v["TX_POWER_DBM"]), ("5", "17"))
+        # Tempo no ar (fórmula Semtech) do frame de 250 B cabe em 1 s.
+        sf, bw, pl, cr = 7, 125e3, 250, 1
+        symbols = 8 + max(math.ceil((8 * pl - 4 * sf + 28 + 16) / (4 * sf)) * (cr + 4), 0)
+        airtime = (8 + 4.25 + symbols) * (2 ** sf) / bw
+        self.assertLess(airtime, 0.5)
+
 if __name__ == "__main__":
     unittest.main()

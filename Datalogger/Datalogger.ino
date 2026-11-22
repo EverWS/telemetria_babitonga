@@ -376,7 +376,7 @@ void loop() {
   gps.update(now);
   serviceTemperatures(now);
   // [AJUSTE] Período de aquisição/telemetria: 1000 ms. Mudar afeta o tempo no
-  // ar do LoRa (~0,4 s por frame de 250 B) e o cálculo de energia/SoC.
+  // ar do LoRa (~0,39 s por frame de 250 B em SF7, ADR-007) e o cálculo de energia/SoC.
   if (now - lastSampleMs < 1000) return;
   const uint32_t elapsedMs = lastSampleMs == 0 ? 0 : now - lastSampleMs;
   lastSampleMs = now;

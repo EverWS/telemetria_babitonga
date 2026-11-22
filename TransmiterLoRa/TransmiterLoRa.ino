@@ -28,7 +28,7 @@ static constexpr uint32_t STATS_INTERVAL_MS = 5000;
 static constexpr uint32_t UART_FRAME_GAP_MS = 50;
 // Recuo de sequência até 8 = fora de ordem; maior = RP2040 reiniciou (ressincroniza).
 static constexpr uint16_t SEQUENCE_REORDER_WINDOW = 8;
-// Um frame de 250 B continua chegando enquanto LoRa.endPacket() bloqueia (~0,4 s).
+// Um frame de 250 B continua chegando enquanto LoRa.endPacket() bloqueia (~0,39 s).
 static constexpr size_t UART_RX_BUFFER_SIZE = 1024;
 
 // Contadores mostrados no relatório serial.
@@ -198,6 +198,6 @@ void setup() {
 void loop() {
   const uint32_t nowMs = millis();
   pollUart();        // recebe do RP2040
-  transmitOne();     // envia um frame por volta (bloqueia ~0,4 s durante o TX)
+  transmitOne();     // envia um frame por volta (bloqueia ~0,39 s durante o TX, ADR-007)
   reportStats(nowMs);
 }

@@ -21,8 +21,15 @@ private:
 	// 26 antes de usar LoRa.onReceive().
 	static constexpr auto DIO0 = 14;
 
-	// [AJUSTE] Frequência: 915 MHz (Brasil). Igual à do TransmiterLoRa.
-	static constexpr auto BAND = 915e6; // In Brazil we use 915 MHz for LoRa.
+	// [AJUSTE] Parâmetros do enlace LoRa (ADR-007), IDÊNTICOS aos do
+	// TransmiterLoRa/Radio.h [CONTRATO] (o teste de paridade confere).
+	static constexpr auto BAND = 915e6;              // frequência central: 915,0 MHz (Brasil)
+	static constexpr int SPREADING_FACTOR = 7;       // SF7
+	static constexpr long SIGNAL_BANDWIDTH = 125E3;  // 125 kHz
+	static constexpr int CODING_RATE_DENOMINATOR = 5;  // CR 4/5
+	static constexpr int TX_POWER_DBM = 17;          // usado só se o receptor transmitir
+	static constexpr long PREAMBLE_SYMBOLS = 8;
+	static constexpr int SYNC_WORD = 0x34;
 
 public:
 	auto init(void) -> bool {
@@ -37,6 +44,14 @@ public:
 
 		if (not LoRa.begin(BAND, true)) return false;  // true = PA_BOOST da Heltec
 
+		// Sobrescreve os padrões da biblioteca (que usava SF11).
+		LoRa.setSpreadingFactor(SPREADING_FACTOR);
+		LoRa.setSignalBandwidth(SIGNAL_BANDWIDTH);
+		LoRa.setCodingRate4(CODING_RATE_DENOMINATOR);
+		LoRa.setTxPower(TX_POWER_DBM, RF_PACONFIG_PASELECT_PABOOST);
+		LoRa.setPreambleLength(PREAMBLE_SYMBOLS);
+		LoRa.setSyncWord(SYNC_WORD);
+		LoRa.disableLowDataRate();  // símbolo de 1 ms em SF7: LDRO desligado
 		LoRa.enableCrc();  // descarta pacotes LoRa corrompidos no próprio rádio
 		LoRa.receive();
 		return true;
