@@ -1,0 +1,1591 @@
+<!DOCTYPE html>
+<!--
+  Dashboard web Rev B (Equipe Babitonga) — servido por web_dash/webserver.py.
+  Recebe snapshots por Socket.IO ("telemetry_snapshot", "telemetry_update",
+  "gps_track_point") e desenha: indicadores do topo, casco 3D (IMU), mapa GPS,
+  temperaturas, energia (MPPT A/B/C, bateria, motor) e fluxo.
+  Modo demonstração: abrir com ?demo=1 (ou direto pelo arquivo, sem servidor).
+  Marcadores: [AJUSTE] valores para conferir; [NOVO SENSOR] onde exibir um
+  dado novo; [CONTRATO] nomes de campos que vêm do webserver.py.
+-->
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Babitonga — Sistema de Telemetria</title>
+    <meta name="theme-color" content="#3DB3AE">
+    <link rel="icon" type="image/png" href="../static/img/logo_babitonga.png">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+    <!-- caminhos relativos funcionam no Flask e no Live Server -->
+    <script src="../static/socket.io.min.js"></script>
+    <script src="../static/three.min.js"></script>
+    <script src="../static/sambaqui_model.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <style>
+        /* =====================================================
+           Tema claro — paleta da logo Equipe Babitonga
+           céu #96CEF2 · água #5DBAD1 · teal #3DB3AE · mar #00A88A
+           verde #00A35A · sol #F2AE00 · grafite #6D6E71
+           ===================================================== */
+        :root {
+            --bg: #F2F6F8;
+            --surface: #FFFFFF;
+            --surface2: #F6FAFB;
+            --border: #DCE6EA;
+            --border-strong: #C5D5DB;
+            --text: #1E2C32;
+            --text-dim: #5E6A70;
+            --text-faint: #8C989D;
+
+            --sky: #96CEF2;
+            --water: #5DBAD1;
+            --brand: #3DB3AE;
+            --brand-dark: #16807A;   /* teal acessível para texto (AA em branco) */
+            --sea: #00A88A;
+            --green: #00A35A;
+            --sun: #F2AE00;
+            --graphite: #6D6E71;
+
+            --accent: var(--brand-dark);
+            --accent2: #078A4E;      /* estado OK (texto) */
+            --cold: #2C84B5;         /* abaixo da faixa */
+            --warn: #B57900;         /* atenção (texto) */
+            --danger: #C93C3C;
+
+            --radius: 12px;
+            --shadow: 0 1px 2px rgba(22, 60, 70, .06), 0 8px 20px -12px rgba(22, 60, 70, .18);
+            --glow: var(--shadow);
+            --font: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--font);
+            font-size: 15px;
+            line-height: 1.4;
+            min-height: 100vh;
+            overflow-x: hidden;
+            font-variant-numeric: tabular-nums;
+            -webkit-font-smoothing: antialiased;
+        }
+        button { font-family: inherit; }
+        :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+        /* ---- HEADER ---- */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 10px 28px;
+            background: rgba(255, 255, 255, .92);
+            backdrop-filter: blur(8px);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+        header::after {
+            content: '';
+            position: absolute; left: 0; right: 0; bottom: -1px; height: 3px;
+            background: linear-gradient(90deg, var(--sky), var(--water) 30%, var(--brand) 55%, var(--sea) 75%, var(--green));
+        }
+        .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+        /* Mostra só o símbolo da logo (a imagem completa inclui o nome da equipe). */
+        .brand-mark { width: 46px; height: 46px; overflow: hidden; flex: none; }
+        .brand-mark img { display: block; width: 73px; height: auto; margin-left: -13px; }
+        .brand-text { display: flex; flex-direction: column; min-width: 0; }
+        .brand-title { font-size: 1.15rem; font-weight: 700; letter-spacing: .2px; color: var(--text); white-space: nowrap; }
+        .brand-title b { color: var(--brand-dark); font-weight: 700; }
+        .brand-sub { font-size: .74rem; color: var(--text-dim); letter-spacing: .4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .header-right { display: flex; align-items: center; gap: 12px; }
+        .header-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: .78rem;
+            font-weight: 600;
+            padding: 6px 12px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--surface);
+        }
+        .status-dot {
+            width: 9px; height: 9px;
+            border-radius: 50%;
+            background: var(--danger);
+            box-shadow: 0 0 0 3px rgba(201, 60, 60, .15);
+            transition: all .3s;
+        }
+        .status-dot.connected { background: var(--green); box-shadow: 0 0 0 3px rgba(0, 163, 90, .18); }
+        #status-label { color: var(--text-dim); letter-spacing: .4px; }
+        .header-time {
+            font-size: .78rem;
+            color: var(--text-dim);
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+        }
+        #loop-time-header { color: var(--brand-dark); font-weight: 600; }
+
+        /* ---- MAIN LAYOUT ---- */
+        main { padding: 22px 28px 32px; display: flex; flex-direction: column; gap: 26px; max-width: 1920px; margin: 0 auto; }
+
+        .section-title {
+            display: flex; align-items: center; gap: 10px;
+            font-size: .78rem;
+            font-weight: 700;
+            letter-spacing: 1.2px;
+            color: var(--text);
+            text-transform: uppercase;
+            margin-bottom: 12px;
+        }
+        .section-title::before {
+            content: ''; width: 4px; height: 16px; border-radius: 2px;
+            background: linear-gradient(180deg, var(--water), var(--brand));
+        }
+
+        /* ---- KPI STRIP ---- */
+        .kpi-strip { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 14px; }
+        .kpi {
+            position: relative;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 16px 13px;
+            box-shadow: var(--shadow);
+            min-width: 0;
+            overflow: hidden;
+        }
+        .kpi::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--kpi, var(--brand)); }
+        .kpi-label { font-size: .68rem; font-weight: 700; letter-spacing: 1px; color: var(--text-dim); text-transform: uppercase; }
+        .kpi-value { font-size: 1.55rem; font-weight: 700; color: var(--text); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .kpi-value small { font-size: .8rem; font-weight: 600; color: var(--text-dim); margin-left: 3px; }
+        .kpi-sub { font-size: .74rem; color: var(--text-dim); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .kpi.k-speed { --kpi: var(--brand); }
+        .kpi.k-rpm { --kpi: var(--sun); }
+        .kpi.k-motor-temp { --kpi: var(--sea); }
+        .kpi.k-soc { --kpi: var(--green); }
+        .kpi.k-gps { --kpi: var(--sky); }
+        .kpi.k-link { --kpi: var(--water); }
+        .kpi.k-nodata .kpi-value { color: var(--text-faint); }
+        .soc-bar { height: 4px; margin-top: 6px; border-radius: 2px; background: var(--border); overflow: hidden; }
+        .soc-bar i { display: block; height: 100%; width: 0; background: var(--green); transition: width .4s, background .3s; }
+        .kpi.k-alert .soc-bar i { background: var(--danger); }
+        .kpi.k-alert { --kpi: var(--danger); }
+
+        /* ---- HULL 3D CARDS (vista lateral + vista traseira) ---- */
+        .hull-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 16px;
+        }
+        @media (max-width: 900px) { .hull-grid { grid-template-columns: 1fr; } }
+
+        .hull-card {
+            --lv: var(--accent2);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-direction: column;
+        }
+        .hull-card.lv-ok   { --lv: var(--accent2); }
+        .hull-card.lv-ac   { --lv: var(--brand-dark); }
+        .hull-card.lv-warn { --lv: var(--warn); }
+        .hull-card.lv-bad  { --lv: var(--danger); }
+
+        .hc-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 12px;
+            padding: 10px 16px;
+            background: var(--surface2);
+            border-bottom: 1px solid var(--border);
+        }
+        .hc-title { font-size: .78rem; font-weight: 700; letter-spacing: 1px; color: var(--text); }
+        .hc-sub { font-size: .74rem; color: var(--text-dim); text-align: right; }
+
+        .hull-stage {
+            position: relative;
+            aspect-ratio: 16 / 10;
+            min-height: 250px;
+            background: linear-gradient(180deg, #E9F5FD 0%, #F6FBFE 52%, #E4F4F3 100%);
+        }
+        .hull-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+        .hud-end {
+            position: absolute;
+            top: 12px;
+            font-size: .64rem;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+            color: var(--text-faint);
+            pointer-events: none;
+        }
+        .hud-end.l { left: 14px; }
+        .hud-end.r { right: 14px; }
+
+        .hud-readout {
+            position: absolute;
+            left: 50%; top: 6px;
+            transform: translateX(-50%);
+            text-align: center;
+            pointer-events: none;
+        }
+        .hud-angle {
+            font-weight: 800;
+            font-size: 1.85rem;
+            line-height: 1.1;
+            color: var(--lv);
+            transition: color .3s;
+        }
+        .hud-state { font-size: .66rem; font-weight: 700; letter-spacing: 1.5px; color: var(--lv); transition: color .3s; }
+
+        .tilt-scale {
+            position: absolute;
+            left: 7%; right: 7%; bottom: 26px;
+            height: 8px;
+            border: 1px solid var(--border-strong);
+            border-radius: 4px;
+            background:
+                repeating-linear-gradient(90deg, rgba(94, 106, 112, .45) 0 1px, transparent 1px calc(100% / 6)),
+                rgba(255, 255, 255, .85);
+        }
+        .tilt-scale .zero {
+            position: absolute; left: 50%; top: -4px; bottom: -4px; width: 2px;
+            background: var(--text-dim); transform: translateX(-50%);
+        }
+        .tilt-scale .lbl {
+            position: absolute; top: 12px;
+            transform: translateX(-50%);
+            font-size: .6rem; color: var(--text-dim);
+            white-space: nowrap;
+        }
+        .tilt-mk {
+            position: absolute; top: 50%; left: 50%;
+            width: 13px; height: 13px;
+            background: var(--lv);
+            border: 2px solid #fff;
+            transform: translate(-50%, -50%) rotate(45deg);
+            box-shadow: 0 1px 4px rgba(22, 60, 70, .35);
+            transition: left .25s ease-out, background .3s;
+        }
+
+        .hull-fallback {
+            position: absolute; inset: 0;
+            display: none; align-items: center; justify-content: center;
+            text-align: center; padding: 20px;
+            color: var(--warn); font-size: .85rem; line-height: 1.5;
+        }
+
+        /* ---- barra de controle do IMU ---- */
+        .imu-bar {
+            margin-top: 14px;
+            display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            padding: 10px 14px;
+        }
+        .g-raw { display: flex; gap: 14px; font-size: .9rem; align-items: baseline; font-weight: 600; }
+        .g-raw b { font-size: .66rem; letter-spacing: 1px; color: var(--text-faint); font-weight: 700; margin-right: 4px; }
+        .g-raw span.x { color: var(--cold); }
+        .g-raw span.y { color: var(--accent2); }
+        .g-raw span.z { color: var(--warn); }
+        .imu-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+        .chip-btn {
+            font-size: .7rem; font-weight: 600; letter-spacing: .6px;
+            color: var(--text); background: var(--surface);
+            border: 1px solid var(--border-strong); border-radius: 8px;
+            padding: 7px 11px; cursor: pointer;
+            transition: border-color .2s, color .2s, background .2s;
+        }
+        .chip-btn:hover { border-color: var(--brand); color: var(--brand-dark); background: #F0FAF9; }
+        .chip-btn.on { border-color: var(--brand); color: #fff; background: var(--brand-dark); }
+
+        /* ---- ANALOG GAUGE ---- */
+        .gauges-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+            gap: 16px;
+        }
+        .gauge-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            padding: 16px 12px 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            transition: border-color .3s, box-shadow .3s;
+            position: relative;
+            overflow: hidden;
+        }
+        .gauge-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: var(--brand);
+        }
+        .gauge-card.alarm-low::before { background: var(--cold); }
+        .gauge-card.alarm-high::before { background: var(--danger); }
+        .gauge-card.alarm-ok::before { background: var(--green); }
+        .gauge-card.disconnected::before { background: var(--border-strong); }
+
+        .gauge-card h4 {
+            font-size: .7rem;
+            font-weight: 700;
+            letter-spacing: 1px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+        }
+
+        canvas.gauge-canvas { display: block; width: 120px; height: 120px; }
+
+        .gauge-value {
+            font-size: 1.35rem;
+            font-weight: 700;
+            color: var(--brand-dark);
+            transition: color .3s;
+            line-height: 1;
+        }
+        .gauge-value.alarm-high { color: var(--danger); }
+        .gauge-value.alarm-low { color: var(--cold); }
+        .gauge-value.alarm-ok { color: var(--accent2); }
+        .gauge-value.disconnected { color: var(--text-faint); }
+
+        .alarm-badge {
+            font-size: .62rem;
+            font-weight: 700;
+            letter-spacing: .8px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            border: 1px solid;
+            transition: all .3s;
+        }
+        .alarm-badge.alarm-ok { border-color: rgba(0, 163, 90, .35); color: var(--accent2); background: rgba(0, 163, 90, .08); }
+        .alarm-badge.alarm-low { border-color: rgba(44, 132, 181, .35); color: var(--cold); background: rgba(44, 132, 181, .08); }
+        .alarm-badge.alarm-high { border-color: rgba(201, 60, 60, .35); color: var(--danger); background: rgba(201, 60, 60, .08); }
+        .alarm-badge.disconnected { border-color: var(--border); color: var(--text-faint); background: var(--surface2); }
+
+        /* ---- SMALL GAUGES (current/flow) ---- */
+        .gauge-card.small { padding: 12px 10px 10px; }
+        .gauge-card.small .gauge-value { font-size: 1.1rem; }
+
+        /* ---- SECTIONS ---- */
+        .row-section { display: flex; flex-direction: column; gap: 4px; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .4; }
+        }
+        .pulsing { animation: pulse 2s ease-in-out infinite; }
+
+        /* ---- REV B DASHBOARD LAYOUT ---- */
+        /* stretch: the GPS card matches the tilt card height side by side */
+        .revb-top { display: grid; grid-template-columns: minmax(300px, .46fr) minmax(420px, .54fr); gap: 18px; align-items: stretch; }
+        .tilt-panel, .map-panel { min-width: 0; }
+        .tilt-panel .hull-grid { grid-template-columns: 1fr; gap: 12px; }
+        .tilt-panel .hull-stage { min-height: 172px; aspect-ratio: 16 / 7; }
+        .tilt-panel .imu-bar { margin-top: 10px; }
+        .map-panel { height: 100%; min-height: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; box-shadow: var(--shadow); display: flex; flex-direction: column; }
+        .map-panel .section-title { margin-bottom: 12px; }
+        /* The map fills the remaining card height; the floor keeps it usable on short viewports. */
+        #map { flex: 1 1 auto; height: auto; min-height: clamp(260px, 45vh, 420px); width: 100%; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: #E6F1F5; }
+        #map.map-no-tiles { background-color: #EAF4F8; background-image: linear-gradient(rgba(61, 179, 174, .12) 1px, transparent 1px), linear-gradient(90deg, rgba(61, 179, 174, .12) 1px, transparent 1px); background-size: 42px 42px, 42px 42px; }
+        .map-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; color: var(--text-dim); font-size: .76rem; font-weight: 600; letter-spacing: .4px; }
+        .map-meta b { color: var(--text); font-weight: 700; margin-left: 4px; }
+        .temp-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+        .metric-lines { display: flex; flex-direction: column; gap: 12px; }
+        .metric-line { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+        .metric-line.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .metric-card { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 13px 14px; min-width: 0; transition: opacity .3s; }
+        .metric-card.stale { opacity: .62; }
+        .metric-card h4 { color: var(--brand-dark); font-size: .72rem; font-weight: 700; letter-spacing: 1px; margin-bottom: 10px; text-transform: uppercase; }
+        .metric-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; }
+        .metric-values span { display: block; color: var(--text-dim); font-size: .68rem; text-transform: uppercase; letter-spacing: .5px; }
+        .metric-values strong { display: block; color: var(--text); font-size: 1.02rem; font-weight: 700; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .flow-grid { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 14px; }
+        .flow-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 14px; }
+        .flow-card h4 { color: var(--text-dim); font-size: .72rem; font-weight: 700; letter-spacing: 1px; }
+        .flow-card canvas { width: 105px; height: 105px; }
+        .flow-value { font-size: 1.5rem; font-weight: 700; color: var(--sea); margin-top: 8px; }
+        .temp-grid .gauge-card { min-width: 0; padding: 11px 7px 9px; gap: 6px; }
+        .temp-grid .gauge-card h4 { font-size: .64rem; }
+        .temp-grid canvas.gauge-canvas { width: 104px; height: 104px; }
+        .temp-grid .gauge-value { font-size: 1.08rem; }
+        .temp-grid .alarm-badge { font-size: .56rem; padding: 2px 6px; }
+        .leaflet-container { font-family: var(--font); background: #E6F1F5; }
+        .leaflet-control-attribution { font-size: 9px; }
+        .leaflet-bar a, .leaflet-control-layers { border-radius: 8px; }
+        .boat-icon { background: transparent; border: 0; }
+        .boat-icon svg { display: block; width: 42px; height: 42px; filter: drop-shadow(0 1px 2px rgba(22, 60, 70, .45)); }
+        .boat-rotor { transition: transform .4s ease-out; }
+        .map-follow { margin: 10px 10px 0 0; background: var(--surface); box-shadow: var(--shadow); }
+        .fallback-map-svg { display: block; width: 100%; height: 100%; background: repeating-linear-gradient(0deg, transparent 0 41px, rgba(61, 179, 174, .12) 42px), repeating-linear-gradient(90deg, transparent 0 41px, rgba(61, 179, 174, .12) 42px); }
+        .fallback-boat svg { width: 64px; height: 64px; }
+
+        footer { text-align: center; padding: 6px 16px 24px; color: var(--text-faint); font-size: .74rem; }
+
+        @media (max-width: 1400px) {
+            .kpi-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        }
+        @media (max-width: 1050px) {
+            .revb-top { grid-template-columns: 1fr; }
+            .map-panel { height: auto; }
+            /* Single column: size from the card width, capped by the viewport height. */
+            #map { flex: none; height: auto; min-height: 240px; aspect-ratio: 4 / 3; max-height: 70vh; }
+            .temp-grid { grid-template-columns: repeat(5, minmax(110px, 1fr)); overflow-x: auto; }
+            .metric-line, .metric-line.three { grid-template-columns: repeat(4, minmax(150px, 1fr)); overflow-x: auto; }
+            .metric-line.three { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
+        }
+        @media (max-width: 680px) {
+            main { padding: 16px 12px 24px; gap: 20px; }
+            header { padding: 8px 14px; }
+            .brand-sub { display: none; }
+            .brand-title { font-size: 1rem; overflow: hidden; text-overflow: ellipsis; }
+            .brand-title b { display: none; }
+            .brand-mark { width: 38px; height: 38px; }
+            .brand-mark img { width: 60px; margin-left: -11px; }
+            .header-status { padding: 5px 10px; font-size: .7rem; white-space: nowrap; }
+            .header-time { display: none; }
+            .kpi-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+            .kpi { padding: 11px 12px; }
+            .kpi-value { font-size: 1.25rem; }
+            .tilt-panel .hull-stage { min-height: 145px; }
+            #map { aspect-ratio: 1 / 1; max-height: 65vh; }
+            .map-meta { gap: 6px 14px; }
+            .flow-grid { grid-template-columns: 1fr; }
+        }
+        /* Landscape phones / short displays: wide map that still fits on screen. */
+        @media (max-height: 560px) and (orientation: landscape) {
+            #map { aspect-ratio: 16 / 9; min-height: 200px; max-height: 78vh; }
+        }
+        /* Large / 4K panels: allow a taller map without leaving empty card space. */
+        @media (min-width: 1800px) {
+            #map { min-height: clamp(420px, 50vh, 760px); }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="brand">
+        <div class="brand-mark"><img src="../static/img/logo_babitonga.png" alt="Equipe Babitonga"></div>
+        <div class="brand-text">
+            <span class="brand-title">Equipe Babitonga <b>· Telemetria</b></span>
+            <span class="brand-sub">UFSC · CTJ · Joinville — embarcação solar</span>
+        </div>
+    </div>
+    <div class="header-right">
+        <div class="header-status">
+            <div class="status-dot" id="status-dot"></div>
+            <span id="status-label">AGUARDANDO</span>
+        </div>
+        <div class="header-time">Frame <span id="loop-time-header">--</span></div>
+    </div>
+</header>
+
+<main>
+    <section class="kpi-strip" aria-label="Resumo da telemetria">
+        <article class="kpi k-speed"><div class="kpi-label">Velocidade</div><div class="kpi-value" id="kpi-speed">--</div><div class="kpi-sub" id="kpi-speed-sub">--</div></article>
+        <article class="kpi k-rpm"><div class="kpi-label">Rotação do motor</div><div class="kpi-value" id="kpi-rpm">--</div><div class="kpi-sub" id="kpi-rpm-sub">--</div></article>
+        <article class="kpi k-motor-temp"><div class="kpi-label">Temperatura do motor</div><div class="kpi-value" id="kpi-motor-temp">--</div><div class="kpi-sub" id="kpi-motor-temp-sub">--</div></article>
+        <article class="kpi k-soc"><div class="kpi-label">Carga da bateria</div><div class="kpi-value" id="kpi-soc">--</div><div class="kpi-sub" id="kpi-soc-sub">--</div><div class="soc-bar"><i id="kpi-soc-bar"></i></div></article>
+        <article class="kpi k-gps"><div class="kpi-label">GPS</div><div class="kpi-value" id="kpi-gps">--</div><div class="kpi-sub" id="kpi-gps-sub">--</div></article>
+        <article class="kpi k-link"><div class="kpi-label">Sinal LoRa</div><div class="kpi-value" id="kpi-link">--</div><div class="kpi-sub" id="kpi-link-sub">--</div></article>
+    </section>
+
+    <div class="revb-top">
+        <section class="tilt-panel">
+            <div class="section-title">IMU — Atitude do casco</div>
+            <div class="hull-grid">
+                <section class="hull-card" id="card-pitch">
+                    <div class="hc-head"><span class="hc-title">PROA / POPA</span><span class="hc-sub">Pitch</span></div>
+                    <div class="hull-stage">
+                        <canvas id="cv-side" aria-label="Inclinação proa e popa"></canvas>
+                        <span class="hud-end l">POPA</span><span class="hud-end r">PROA</span>
+                        <div class="hud-readout"><div class="hud-angle" id="pitch-val">--</div><div class="hud-state" id="pitch-state">SEM DADOS</div></div>
+                        <div class="tilt-scale" id="pitch-scale"><i class="zero"></i><i class="tilt-mk" id="pitch-mk"></i></div>
+                        <div class="hull-fallback">Visualização 3D indisponível.</div>
+                    </div>
+                </section>
+                <section class="hull-card" id="card-roll">
+                    <div class="hc-head"><span class="hc-title">BB / BE</span><span class="hc-sub">Roll</span></div>
+                    <div class="hull-stage">
+                        <canvas id="cv-rear" aria-label="Inclinação bombordo e boreste"></canvas>
+                        <span class="hud-end l">BOMBORDO · BB</span><span class="hud-end r">BORESTE · BE</span>
+                        <div class="hud-readout"><div class="hud-angle" id="roll-val">--</div><div class="hud-state" id="roll-state">SEM DADOS</div></div>
+                        <div class="tilt-scale" id="roll-scale"><i class="zero"></i><i class="tilt-mk" id="roll-mk"></i></div>
+                        <div class="hull-fallback">Visualização 3D indisponível.</div>
+                    </div>
+                </section>
+            </div>
+            <div class="imu-bar">
+                <div class="g-raw"><span><b>X</b><span class="x" id="g-x">--</span></span><span><b>Y</b><span class="y" id="g-y">--</span></span><span><b>Z</b><span class="z" id="g-z">--</span></span><span style="color:var(--text-dim)">g</span></div>
+                <div class="imu-actions">
+                    <button class="chip-btn" id="btn-tare">ZERAR</button>
+                    <button class="chip-btn" id="btn-inv-pitch">INVERTER PROA/POPA</button>
+                    <button class="chip-btn" id="btn-inv-roll">INVERTER BB/BE</button>
+                    <button class="chip-btn" id="btn-swap">TROCAR X↔Y</button>
+                    <button class="chip-btn" id="btn-sim">SIMULAR</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="map-panel">
+            <div class="section-title">GPS — Posição do LoRa remoto</div>
+            <div id="map" aria-label="Mapa da posição GPS da embarcação"></div>
+            <div class="map-meta"><span>LAT <b id="gps-lat">--</b></span><span>LON <b id="gps-lon">--</b></span><span>HDOP <b id="gps-hdop">--</b></span><span>SAT <b id="gps-sat">--</b></span></div>
+        </section>
+    </div>
+
+    <section class="row-section">
+        <div class="section-title">Sensores de temperatura · 10 canais</div>
+        <div class="temp-grid" id="temp-grid"></div>
+    </section>
+
+    <section class="row-section">
+        <div class="section-title">Corrente, Tensão e Potência</div>
+        <div class="metric-lines" id="metric-lines"></div>
+        <div class="section-title" style="margin-top: 18px;">Fluxo</div>
+        <div class="flow-grid" id="flow-grid"></div>
+    </section>
+</main>
+<footer>Equipe Babitonga · UFSC Centro Tecnológico de Joinville · Telemetria Rev B</footer>
+
+<script>
+// =============================================
+// CONFIGURAÇÃO DOS SENSORES EXIBIDOS
+// =============================================
+// [AJUSTE] Faixas de alarme das 10 temperaturas (°C): os 2 primeiros sensores
+// (água de arrefecimento) usam 15–35; os demais 10–45. Ajuste por posição real
+// do sensor (ver MONTAGEM_HARDWARE_TELEMETRIA.md §8). min/max = escala do mostrador.
+// [NOVO SENSOR] Mais de 10 temperaturas exige mudar o payload [CONTRATO].
+const TEMP_SENSORS = Array.from({ length: 10 }, (_, i) => ({
+    id: `temp_${i}`,
+    label: `TEMP ${String(i + 1).padStart(2, '0')}`,
+    unit: '°C', min: -10, max: 80,
+    lowAlarm: i < 2 ? 15 : 10,
+    highAlarm: i < 2 ? 35 : 45,
+}));
+// [CONTRATO] Canais elétricos na ordem do payload schema 3 (ids vindos do webserver.py).
+const CHANNELS = [
+    { id: 'mppt_a', label: 'MPPT A' },
+    { id: 'mppt_b', label: 'MPPT B' },
+    { id: 'mppt_c', label: 'MPPT C' },
+    { id: 'battery', label: 'BATERIA' },
+];
+
+// =============================================
+// ESTADO DA PÁGINA
+// =============================================
+const state = { accel: { x: 0, y: 0, z: 1 }, latest: null, mapTrack: [] };
+
+// =============================================
+// DESENHO DOS MOSTRADORES ANALÓGICOS (canvas)
+// =============================================
+// Desenha um mostrador circular: trilha, faixas de alarme (anel externo fino),
+// marcas e o arco do valor. value null = sem dado (só a trilha). Nítido em
+// telas HiDPI (usa devicePixelRatio).
+function drawGauge(canvas, value, min, max, opts = {}) {
+    // HiDPI: keep the logical size from the width/height attributes and draw
+    // into a devicePixelRatio-scaled backing store (sharp on retina/4K panels).
+    if (!canvas.dataset.logicalW) { canvas.dataset.logicalW = canvas.width; canvas.dataset.logicalH = canvas.height; }
+    const W = Number(canvas.dataset.logicalW), H = Number(canvas.dataset.logicalH);
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    if (canvas.width !== Math.round(W * dpr)) { canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const cx = W / 2, cy = H / 2;
+    const R = Math.min(W, H) / 2 - 8;
+    ctx.clearRect(0, 0, W, H);
+
+    const startAngle = Math.PI * 0.75;
+    const endAngle   = Math.PI * 2.25;
+    const totalAngle = endAngle - startAngle;
+
+    // Track BG
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, startAngle, endAngle);
+    ctx.strokeStyle = '#E6EEF1';
+    ctx.lineWidth = 8;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    // Alarm zones (temp only): thin outer band so the value arc stays dominant
+    if (opts.lowAlarm !== undefined) {
+        // Low zone
+        const lowAngle = startAngle + totalAngle * (opts.lowAlarm - min) / (max - min);
+        ctx.beginPath();
+        ctx.arc(cx, cy, R + 6, startAngle, lowAngle);
+        ctx.strokeStyle = 'rgba(44,132,181,0.55)';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        // OK zone
+        const highAngle = startAngle + totalAngle * (opts.highAlarm - min) / (max - min);
+        ctx.beginPath();
+        ctx.arc(cx, cy, R + 6, lowAngle, highAngle);
+        ctx.strokeStyle = 'rgba(0,163,90,0.45)';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        // High zone
+        ctx.beginPath();
+        ctx.arc(cx, cy, R + 6, highAngle, endAngle);
+        ctx.strokeStyle = 'rgba(201,60,60,0.50)';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+    }
+
+    // Ticks
+    for (let i = 0; i <= 10; i++) {
+        const a = startAngle + totalAngle * (i / 10);
+        const isMajor = i % 5 === 0;
+        const r1 = R - (isMajor ? 10 : 6);
+        const r2 = R - 2;
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+        ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
+        ctx.strokeStyle = isMajor ? '#9AA9AF' : '#CAD6DA';
+        ctx.lineWidth = isMajor ? 2 : 1;
+        ctx.stroke();
+    }
+
+    // Arc fill
+    if (value !== null) {
+        let ratio = (value - min) / (max - min);
+        ratio = Math.max(0, Math.min(1, ratio));
+        const valueAngle = startAngle + totalAngle * ratio;
+
+        let color = opts.color || '#3DB3AE';
+        if (opts.lowAlarm !== undefined) {
+            if (value < opts.lowAlarm) color = '#2C84B5';
+            else if (value > opts.highAlarm) color = '#C93C3C';
+            else color = '#00A35A';
+        } else if (opts.isNeg && value < 0) {
+            color = '#F2AE00';
+        }
+
+        const grd = ctx.createLinearGradient(cx - R, cy, cx + R, cy);
+        grd.addColorStop(0, color + '88');
+        grd.addColorStop(1, color);
+
+        ctx.beginPath();
+        ctx.arc(cx, cy, R, startAngle, valueAngle);
+        ctx.strokeStyle = grd;
+        ctx.lineWidth = 8;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        // Needle dot
+        ctx.beginPath();
+        ctx.arc(cx + Math.cos(valueAngle) * (R - 4), cy + Math.sin(valueAngle) * (R - 4), 4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.stroke();
+    }
+
+    // Label (center)
+    if (opts.label) {
+        ctx.fillStyle = '#5E6A70';
+        ctx.font = '600 9px "Segoe UI", Roboto, Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(opts.label, cx, cy + R - 18);
+    }
+}
+
+// =============================================
+// CRIAÇÃO DOS CARDS (temperatura, energia, fluxo)
+// =============================================
+// Cria os 10 cards de temperatura com o mostrador vazio.
+function buildTempCards() {
+    const grid = document.getElementById('temp-grid');
+    TEMP_SENSORS.forEach(s => {
+        const card = document.createElement('div');
+        card.className = 'gauge-card disconnected';
+        card.id = `card_${s.id}`;
+        card.innerHTML = `
+            <h4>${s.label}</h4>
+            <canvas class="gauge-canvas" id="canvas_${s.id}" width="120" height="120"></canvas>
+            <div class="gauge-value disconnected" id="val_${s.id}">--</div>
+            <div class="alarm-badge disconnected" id="badge_${s.id}">SEM DADOS</div>
+        `;
+        grid.appendChild(card);
+        drawGauge(card.querySelector('canvas'), null, s.min, s.max, { lowAlarm: s.lowAlarm, highAlarm: s.highAlarm, label: s.unit });
+    });
+}
+
+// Cria cards simples de mostrador (uso genérico).
+function buildSimpleCards(sensors, gridId, opts = {}) {
+    const grid = document.getElementById(gridId);
+    sensors.forEach(s => {
+        const card = document.createElement('div');
+        card.className = 'gauge-card small';
+        card.id = `card_${s.id}`;
+        card.innerHTML = `
+            <h4>${s.label}</h4>
+            <canvas class="gauge-canvas" id="canvas_${s.id}" width="120" height="120"></canvas>
+            <div class="gauge-value" id="val_${s.id}">--</div>
+        `;
+        grid.appendChild(card);
+        drawGauge(card.querySelector('canvas'), null, s.min, s.max, { isNeg: s.min < 0, label: s.unit });
+    });
+}
+
+// Formata um número com casas decimais e unidade; inválido vira "--" (nunca 0).
+function formatMetric(value, digits = 1, unit = '') {
+    return Number.isFinite(value) ? `${value.toFixed(digits)}${unit ? ` ${unit}` : ''}` : '--';
+}
+
+// Card de energia com corrente, tensão e potência.
+function buildMetricCard(id, label) {
+    const card = document.createElement('article');
+    card.className = 'metric-card stale';
+    card.id = `metric_${id}`;
+    card.innerHTML = `<h4>${label}</h4><div class="metric-values">
+        <div><span>corrente</span><strong id="${id}_current">--</strong></div>
+        <div><span>tensão</span><strong id="${id}_voltage">--</strong></div>
+        <div><span>potência</span><strong id="${id}_power">--</strong></div>
+    </div>`;
+    return card;
+}
+
+// Monta as duas linhas de energia: os 4 canais e o resumo (solar, bateria, motor).
+// [NOVO SENSOR] Um novo nó elétrico = um id a mais aqui e em renderMetrics().
+function buildMetricCards() {
+    const container = document.getElementById('metric-lines');
+    const rows = [
+        CHANNELS.map(channel => channel.id),
+        ['mppt_total', 'battery_summary', 'motor'],
+    ];
+    const labels = Object.fromEntries(CHANNELS.map(channel => [channel.id, channel.label]));
+    Object.assign(labels, { mppt_total: 'GERAÇÃO SOLAR · 3 MPPTs', battery_summary: 'BATERIA · RESUMO', motor: 'MOTOR · VESC (ENTRADA)' });
+    rows.forEach(row => {
+        const line = document.createElement('div');
+        line.className = row.length === 3 ? 'metric-line three' : 'metric-line';
+        row.forEach(id => line.appendChild(buildMetricCard(id, labels[id])));
+        container.appendChild(line);
+    });
+}
+
+// Atualiza os três valores de um card de energia (sem dado = card esmaecido).
+function setMetric(id, values) {
+    const card = document.getElementById(`metric_${id}`);
+    if (!card) return;
+    const present = Object.values(values).some(value => Number.isFinite(value));
+    card.classList.toggle('stale', !present);
+    document.getElementById(`${id}_current`).textContent = formatMetric(values.current, 2, 'A');
+    document.getElementById(`${id}_voltage`).textContent = formatMetric(values.voltage, 2, 'V');
+    document.getElementById(`${id}_power`).textContent = formatMetric(values.power, 2, 'W');
+}
+
+// Cria os mostradores de fluxo A e B (escala 0–100 L/min).
+function buildFlowCards() {
+    const grid = document.getElementById('flow-grid');
+    ['flow_a', 'flow_b'].forEach((id, index) => {
+        const card = document.createElement('article');
+        card.className = 'flow-card';
+        card.id = `card_${id}`;
+        card.innerHTML = `<canvas id="canvas_${id}" width="110" height="110"></canvas><div><h4>FLUXO ${index === 0 ? 'A' : 'B'}</h4><div class="flow-value" id="value_${id}">-- L/min</div></div>`;
+        grid.appendChild(card);
+        drawGauge(card.querySelector('canvas'), null, 0, 100, { label: 'L/min', color: '#00A88A' });
+    });
+}
+
+// Fluxo A vem no canal mppt_a e fluxo B no mppt_b (layout do payload).
+function renderFlows(snapshot) {
+    const channels = Object.fromEntries((snapshot.channels || []).map(channel => [channel.id, channel]));
+    [['flow_a', channels.mppt_a], ['flow_b', channels.mppt_b]].forEach(([id, channel]) => {
+        const value = channel && Number.isFinite(channel.flow_l_min) ? channel.flow_l_min : null;
+        document.getElementById(`value_${id}`).textContent = value === null ? '-- L/min' : `${value.toFixed(2)} L/min`;
+        drawGauge(document.getElementById(`canvas_${id}`), value, 0, 100, { label: 'L/min', color: '#00A88A' });
+    });
+}
+
+// Preenche os cards de energia a partir do snapshot.
+function renderMetrics(snapshot) {
+    const channels = Object.fromEntries((snapshot.channels || []).map(channel => [channel.id, channel]));
+    CHANNELS.forEach(channel => {
+        const value = channels[channel.id] || {};
+        setMetric(channel.id, { current: value.current_a, voltage: value.voltage_v, power: value.power_w });
+    });
+    const mppts = ['mppt_a', 'mppt_b', 'mppt_c'].map(id => channels[id] || {});
+    const finite = values => values.filter(Number.isFinite);
+    const sum = values => finite(values).length ? finite(values).reduce((total, value) => total + value, 0) : NaN;
+    const battery = channels.battery || {};
+    // Tensão das MPPTs: média das saídas válidas (todas ligadas ao barramento da bateria).
+    const voltages = finite(mppts.map(channel => channel.voltage_v));
+    setMetric('mppt_total', {
+        current: sum(mppts.map(channel => channel.current_a)),
+        voltage: voltages.length ? voltages.reduce((a, b) => a + b, 0) / voltages.length : NaN,
+        power: sum(mppts.map(channel => channel.power_w)),
+    });
+    setMetric('battery_summary', { current: battery.current_a, voltage: battery.voltage_v, power: battery.power_w });
+    const motor = snapshot.motor || {};
+    const motorPower = Number.isFinite(motor.input_voltage_v) && Number.isFinite(motor.input_current_a)
+        ? motor.input_voltage_v * motor.input_current_a : NaN;
+    setMetric('motor', { current: motor.input_current_a, voltage: motor.input_voltage_v, power: motorPower });
+}
+
+// =============================================
+// KPI STRIP (resumo no topo)
+// =============================================
+// Atualiza um card do topo: valor + unidade, subtítulo e estado de alerta/sem dado.
+function setKpi(id, value, digits, unit, sub, alert = false) {
+    const valueEl = document.getElementById(id);
+    const card = valueEl.closest('.kpi');
+    valueEl.textContent = Number.isFinite(value) ? value.toFixed(digits) : '--';
+    if (Number.isFinite(value) && unit) {
+        const small = document.createElement('small');
+        small.textContent = unit;
+        valueEl.appendChild(small);
+    }
+    document.getElementById(`${id}-sub`).textContent = sub;
+    card.classList.toggle('k-alert', alert);
+    card.classList.toggle('k-nodata', !Number.isFinite(value));
+}
+
+// Limites dos cards do topo: ajuste ao motor e ao banco de baterias reais.
+const MOTOR_TEMP_ALARM_C = 80;
+const BATTERY_SOC_LOW_PCT = 20;
+const KNOTS_PER_MPS = 1.943844;
+
+// Velocidade sobre o fundo (SOG) estimada pelas posições GPS consecutivas,
+// usada enquanto o payload não trouxer a velocidade do NEO-6M (RMC).
+const SpeedEstimator = (() => {
+    let last = null, knots = NaN;
+    function haversineM(a, b) {
+        const R = 6371000, rad = Math.PI / 180;
+        const dLat = (b.lat - a.lat) * rad, dLng = (b.lng - a.lng) * rad;
+        const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLng / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(h));
+    }
+    return {
+        update(gps, timestampMs) {
+            const valid = gps && gps.valid && Number.isFinite(gps.latitude) && Number.isFinite(gps.longitude) && Number.isFinite(timestampMs);
+            if (!valid) { last = null; knots = NaN; return knots; }
+            const point = { lat: gps.latitude, lng: gps.longitude, t: timestampMs };
+            if (last && point.t > last.t) {
+                const dt = (point.t - last.t) / 1000;
+                if (dt <= 10) {
+                    const sample = haversineM(last, point) / dt * KNOTS_PER_MPS;
+                    knots = Number.isFinite(knots) ? knots * 0.6 + sample * 0.4 : sample; // EMA anti-ruído
+                } else {
+                    knots = NaN; // lacuna longa: não extrapolar
+                }
+            }
+            if (!last || point.t !== last.t) last = point;
+            return knots;
+        },
+    };
+})();
+
+// Classifica o sinal LoRa. [AJUSTE] Limiares de RSSI/SNR para "Bom/Regular/Fraco".
+function loraQuality(rssi, snr) {
+    if (!Number.isFinite(rssi)) return '';
+    if (rssi >= -90 && (!Number.isFinite(snr) || snr >= 5)) return 'Bom';
+    if (rssi >= -110 && (!Number.isFinite(snr) || snr >= -5)) return 'Regular';
+    return 'Fraco';
+}
+
+// Os 6 cards do topo, na ordem definida pela equipe: velocidade, rotação,
+// temperatura do motor, carga da bateria, GPS e sinal LoRa.
+// [CONTRATO] Campos usados: gps.speed_kn, motor.*, battery_state.*, link.*.
+function renderKpis(snapshot) {
+    const waiting = snapshot.sequence == null;
+    const motor = snapshot.motor || {};
+    const gps = snapshot.gps || {};
+
+    // 1. Velocidade (nós): campo do GPS quando existir; senão, estimada pela trilha.
+    const estimated = SpeedEstimator.update(gps, snapshot.timestamp_ms);
+    const speed = Number.isFinite(gps.speed_kn) ? gps.speed_kn : estimated;
+    let speedSub = gps.valid ? 'Calculando…' : 'Sem fix GPS';
+    if (Number.isFinite(gps.speed_kn)) speedSub = 'SOG · GPS';
+    else if (Number.isFinite(estimated)) speedSub = `SOG estimada · ${formatMetric(speed * 1.852, 1, 'km/h')}`;
+    setKpi('kpi-speed', speed, 1, 'nós', speedSub);
+
+    // 2. Rotação do motor (RPM).
+    setKpi('kpi-rpm', motor.rpm, 0, 'RPM', Number.isFinite(motor.rpm) ? 'Motor de propulsão' : 'Sem leitura do motor');
+
+    // 3. Temperatura do motor.
+    const motorTemp = motor.temperature_c;
+    const motorHot = Number.isFinite(motorTemp) && motorTemp > MOTOR_TEMP_ALARM_C;
+    setKpi('kpi-motor-temp', motorTemp, 1, '°C',
+        Number.isFinite(motorTemp) ? (motorHot ? `Acima de ${MOTOR_TEMP_ALARM_C} °C` : `Limite ${MOTOR_TEMP_ALARM_C} °C`) : 'Sensor não mapeado',
+        motorHot);
+
+    // 4. Carga da bateria (%).
+    const channels = Object.fromEntries((snapshot.channels || []).map(channel => [channel.id, channel]));
+    const battery = channels.battery || {};
+    const socRaw = (snapshot.battery_state || {}).soc_pct;
+    const soc = Number.isFinite(socRaw) ? Math.max(0, Math.min(100, socRaw)) : NaN;
+    const socOrigin = { voltage_estimate: ' · estimada', full_sync: ' · cheia', coulomb: '' }[(snapshot.battery_state || {}).soc_source] || '';
+    setKpi('kpi-soc', soc, 0, '%',
+        `${formatMetric(battery.voltage_v, 1, 'V')} · ${formatMetric(battery.current_a, 1, 'A')}${socOrigin}`,
+        Number.isFinite(soc) && soc < BATTERY_SOC_LOW_PCT);
+    document.getElementById('kpi-soc-bar').style.width = Number.isFinite(soc) ? `${soc}%` : '0';
+
+    // 5. GPS.
+    setKpi('kpi-gps', gps.valid ? gps.satellites : NaN, 0, 'sat',
+        gps.valid ? `Fix ${gps.fix_quality || 1} · HDOP ${formatMetric(gps.hdop, 1)}` : 'Sem fix', !gps.valid && !waiting);
+
+    // 6. Sinal LoRa.
+    const link = snapshot.link || {};
+    const lost = Number.isFinite(link.sequence_lost) ? link.sequence_lost : null;
+    const quality = loraQuality(link.rssi_dbm, link.snr_db);
+    let linkSub = waiting ? 'Aguardando frames' : 'Serial direta (sem RSSI)';
+    if (Number.isFinite(link.rssi_dbm)) linkSub = `${quality} · SNR ${formatMetric(link.snr_db, 1, 'dB')} · perdas ${lost ?? '--'}`;
+    setKpi('kpi-link', Number.isFinite(link.rssi_dbm) ? link.rssi_dbm : NaN, 0, 'dBm', linkSub, quality === 'Fraco');
+}
+
+// Atualiza os 10 cards de temperatura (posição sem sensor = SEM DADOS).
+function renderTemperatures(values) {
+    TEMP_SENSORS.forEach((sensor, index) => {
+        const value = values && values[index];
+        updateTempCard(sensor.id, Number.isFinite(value) ? value : null);
+    });
+}
+
+// Mapa GPS (Leaflet): base OpenStreetMap/Esri/satélite, carta náutica
+// OpenSeaMap, trilha, ícone do barco com rumo e botão SEGUIR.
+// [AJUSTE] Posição inicial do mapa em `fallback` (baía da Babitonga).
+const MapView = (() => {
+    let map = null, marker = null, track = null, fitted = false, lastPoint = null, lastHeading = 0;
+    // Follow the boat until the user pans the map; the "SEGUIR" control re-enables it.
+    let follow = true, centeredOnce = false;
+    let fallbackSvg = null, fallbackRoute = [], fallbackPoint = null, fallbackHeading = 0;
+    const fallback = [-26.25, -48.65];
+    const boatSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><path d="M32 4L48 42L41 54L23 54L16 42Z" fill="#FFFFFF" stroke="#16807A" stroke-width="3"/><path d="M32 12L39 39L32 46L25 39Z" fill="#96CEF2" stroke="#3DB3AE" stroke-width="1.5"/><path d="M22 46Q32 53 42 46L38 56L26 56Z" fill="#00A35A" stroke="#16807A" stroke-width="1.5"/><circle cx="32" cy="31" r="3.5" fill="#F2AE00"/></svg>';
+
+    function renderFallbackMap() {
+        if (!fallbackSvg) return;
+        const points = fallbackRoute.length ? fallbackRoute : [{ lat: fallback[0], lng: fallback[1] }];
+        const lats = points.map(point => point.lat), lngs = points.map(point => point.lng);
+        const minLat = Math.min(...lats), maxLat = Math.max(...lats), minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+        const latPad = Math.max((maxLat - minLat) * .25, .002), lngPad = Math.max((maxLng - minLng) * .25, .002);
+        const loLat = minLat - latPad, hiLat = maxLat + latPad, loLng = minLng - lngPad, hiLng = maxLng + lngPad;
+        const project = point => [((point.lng - loLng) / (hiLng - loLng)) * 1000, (1 - (point.lat - loLat) / (hiLat - loLat)) * 600];
+        const projected = fallbackRoute.map(point => project(point).join(',')).join(' ');
+        const current = fallbackPoint ? project(fallbackPoint) : project(points[points.length - 1]);
+        fallbackSvg.querySelector('polyline').setAttribute('points', projected);
+        fallbackSvg.querySelector('.fallback-boat').setAttribute('transform', `translate(${current[0] - 32} ${current[1] - 32}) rotate(${fallbackHeading} 32 32)`);
+    }
+
+    function init() {
+        const element = document.getElementById('map');
+        if (!element) return;
+        if (typeof L === 'undefined') {
+            element.classList.add('map-no-tiles');
+            element.innerHTML = '<svg class="fallback-map-svg" viewBox="0 0 1000 600" preserveAspectRatio="none"><polyline points="" fill="none" stroke="#16807A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><g class="fallback-boat"></g><text x="24" y="38" fill="#1E2C32" font-size="18">MAPA OFFLINE · GPS / TRILHA LOCAL</text></svg>';
+            fallbackSvg = element.querySelector('.fallback-map-svg');
+            fallbackSvg.querySelector('.fallback-boat').innerHTML = boatSvg;
+            return;
+        }
+        map = L.map(element, { preferCanvas: true, zoomControl: true, minZoom: 3, maxZoom: 19 }).setView(fallback, 12);
+        const street = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' });
+        const fallbackStreet = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Tiles &copy; Esri' });
+        let tileErrors = 0, fallbackActive = false;
+        street.on('tileerror', () => {
+            element.classList.add('tile-error');
+            tileErrors += 1;
+            if (tileErrors >= 3 && !fallbackActive) {
+                fallbackActive = true;
+                map.removeLayer(street);
+                fallbackStreet.addTo(map);
+                element.classList.add('map-no-tiles');
+            }
+        });
+        // Satellite imagery (Esri, no API key) with place/road labels on top.
+        const satellite = L.layerGroup([
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, maxNativeZoom: 18, attribution: 'Imagens &copy; Esri, Maxar, Earthstar Geographics' }),
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, maxNativeZoom: 18 }),
+        ]);
+        // Nautical seamarks (buoys, beacons, channels) drawn over any base map.
+        const seamarks = L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', { maxZoom: 19, maxNativeZoom: 18, minZoom: 9, attribution: 'Carta n&aacute;utica &copy; OpenSeaMap' });
+        const baseLayers = { 'OpenStreetMap': street, 'Mapa alternativo (Esri)': fallbackStreet, 'Satélite': satellite };
+        const overlays = { 'Carta náutica (OpenSeaMap)': seamarks };
+
+        // Remember the viewer's layer choice (per browser, best effort).
+        const readPref = key => { try { return window.localStorage.getItem(key); } catch (e) { return null; } };
+        const writePref = (key, value) => { try { window.localStorage.setItem(key, value); } catch (e) { /* storage blocked */ } };
+        const savedBase = readPref('revb.map.base');
+        if (savedBase && baseLayers[savedBase] && savedBase !== 'OpenStreetMap') {
+            fallbackActive = true; // the viewer chose another base; do not auto-switch away from it
+            baseLayers[savedBase].addTo(map);
+        } else {
+            street.addTo(map);
+        }
+        if (readPref('revb.map.seamarks') !== '0') seamarks.addTo(map);
+        map.on('baselayerchange', event => writePref('revb.map.base', event.name));
+        map.on('overlayadd', event => { if (event.layer === seamarks) writePref('revb.map.seamarks', '1'); });
+        map.on('overlayremove', event => { if (event.layer === seamarks) writePref('revb.map.seamarks', '0'); });
+        L.control.layers(baseLayers, overlays, { collapsed: true }).addTo(map);
+        L.control.scale({ metric: true, imperial: false }).addTo(map);
+        track = L.polyline([], { color: '#16807A', weight: 4, opacity: .85, lineCap: 'round' }).addTo(map);
+        map.on('dragstart', () => { follow = false; });
+        const FollowControl = L.Control.extend({
+            options: { position: 'topright' },
+            onAdd() {
+                const button = L.DomUtil.create('button', 'chip-btn map-follow');
+                button.type = 'button';
+                button.textContent = 'SEGUIR';
+                L.DomEvent.disableClickPropagation(button);
+                L.DomEvent.on(button, 'click', () => {
+                    follow = true;
+                    if (lastPoint) map.panTo(lastPoint, { animate: true });
+                });
+                return button;
+            },
+        });
+        new FollowControl().addTo(map);
+        // Recompute Leaflet's viewport whenever the card changes size (window
+        // resize, orientation change, grid reflow, fonts loading, sidebar...).
+        let resizeFrame = 0;
+        const refreshSize = () => {
+            if (resizeFrame) return;
+            resizeFrame = window.requestAnimationFrame(() => {
+                resizeFrame = 0;
+                map.invalidateSize({ pan: false, debounceMoveend: true });
+                if (follow && lastPoint && !map.getBounds().contains(lastPoint)) map.panTo(lastPoint, { animate: false });
+            });
+        };
+        if (typeof ResizeObserver === 'function') new ResizeObserver(refreshSize).observe(element);
+        else window.addEventListener('resize', refreshSize);
+        window.setTimeout(refreshSize, 0);
+    }
+    function setTrack(points) {
+        const bounded = (points || []).slice(-180).map(point => [point.lat, point.lng]);
+        fallbackRoute = bounded.map(point => ({ lat: point[0], lng: point[1] }));
+        if (!track) { renderFallbackMap(); return; }
+        track.setLatLngs(bounded);
+        if (bounded.length > 1 && !fitted) { map.fitBounds(track.getBounds(), { padding: [18, 18], maxZoom: 15 }); fitted = true; }
+    }
+    function addPoint(point) {
+        if (!track || !point) return;
+        const points = track.getLatLngs().slice(-179).map(latLng => ({ lat: latLng.lat, lng: latLng.lng }));
+        points.push(point); setTrack(points);
+    }
+    function setPosition(gps, center = true) {
+        const lat = gps && gps.latitude, lng = gps && gps.longitude;
+        const valid = gps && gps.valid && Number.isFinite(lat) && Number.isFinite(lng);
+        document.getElementById('gps-lat').textContent = valid ? lat.toFixed(6) : '--';
+        document.getElementById('gps-lon').textContent = valid ? lng.toFixed(6) : '--';
+        document.getElementById('gps-hdop').textContent = valid && Number.isFinite(gps.hdop) ? gps.hdop.toFixed(1) : '--';
+        document.getElementById('gps-sat').textContent = valid ? String(gps.satellites || 0) : '--';
+        if (!valid) return;
+        const point = [lat, lng];
+        const previous = lastPoint;
+        let heading = lastHeading;
+        if (Number.isFinite(gps.heading_deg)) {
+            heading = gps.heading_deg;
+        } else if (previous && (previous[0] !== lat || previous[1] !== lng)) {
+            // Equirectangular bearing: longitude degrees shrink by cos(latitude).
+            const dx = (lng - previous[1]) * Math.cos(lat * Math.PI / 180);
+            heading = Math.atan2(dx, lat - previous[0]) * 180 / Math.PI;
+        }
+        lastHeading = heading;
+        fallbackPoint = { lat, lng };
+        fallbackHeading = heading;
+        if (!map) { lastPoint = point; renderFallbackMap(); return; }
+        if (!marker) {
+            const icon = L.divIcon({ className: 'boat-icon', html: `<div class="boat-rotor" style="width:42px;height:42px">${boatSvg}</div>`, iconSize: [42, 42], iconAnchor: [21, 21] });
+            marker = L.marker(point, { icon }).addTo(map).bindTooltip('LoRa remoto');
+        } else {
+            marker.setLatLng(point);
+        }
+        // Rotate the existing icon instead of rebuilding it every update (avoids flicker).
+        const rotor = marker.getElement() && marker.getElement().querySelector('.boat-rotor');
+        if (rotor) rotor.style.transform = `rotate(${heading}deg)`;
+        lastPoint = point;
+        if (!center) return;
+        if (!centeredOnce) {
+            map.setView(point, Math.max(map.getZoom(), 15), { animate: false });
+            centeredOnce = true;
+        } else if (follow) {
+            // Keep the user's zoom; only pan when the boat leaves the inner area.
+            if (!map.getBounds().pad(-0.2).contains(point)) map.panTo(point, { animate: true });
+        }
+    }
+    return { init, setTrack, addPoint, setPosition };
+})();
+
+// =============================================
+// ATUALIZAÇÃO DOS CARDS DE TEMPERATURA
+// =============================================
+// Atualiza um card de temperatura: cor/rótulo BAIXA, OK ou ALTA conforme a faixa.
+function updateTempCard(id, rawValue) {
+    const cfg = TEMP_SENSORS.find(s => s.id === id);
+    if (!cfg) return;
+
+    const valEl  = document.getElementById(`val_${id}`);
+    const badgeEl = document.getElementById(`badge_${id}`);
+    const cardEl = document.getElementById(`card_${id}`);
+    const canvasEl = document.getElementById(`canvas_${id}`);
+
+    const isNan = rawValue === null || isNaN(rawValue);
+
+    // Remove all alarm classes
+    ['alarm-ok', 'alarm-low', 'alarm-high', 'disconnected'].forEach(c => {
+        cardEl.classList.remove(c);
+        valEl.classList.remove(c);
+        badgeEl.classList.remove(c);
+    });
+
+    if (isNan) {
+        cardEl.classList.add('disconnected');
+        valEl.classList.add('disconnected');
+        badgeEl.classList.add('disconnected');
+        valEl.textContent = '--';
+        badgeEl.textContent = 'DESCONECTADO';
+        drawGauge(canvasEl, null, cfg.min, cfg.max, { lowAlarm: cfg.lowAlarm, highAlarm: cfg.highAlarm, label: cfg.unit });
+        return;
+    }
+
+    let alarmClass, badgeText;
+    if (rawValue < cfg.lowAlarm)       { alarmClass = 'alarm-low';  badgeText = '▼ BAIXA';   }
+    else if (rawValue > cfg.highAlarm) { alarmClass = 'alarm-high'; badgeText = '▲ ALTA';    }
+    else                               { alarmClass = 'alarm-ok';   badgeText = '● OK';       }
+
+    cardEl.classList.add(alarmClass);
+    valEl.classList.add(alarmClass);
+    badgeEl.classList.add(alarmClass);
+    valEl.textContent = rawValue.toFixed(1) + ' °C';
+    badgeEl.textContent = badgeText;
+
+    drawGauge(canvasEl, rawValue, cfg.min, cfg.max, { lowAlarm: cfg.lowAlarm, highAlarm: cfg.highAlarm, label: cfg.unit });
+}
+
+// Atualiza um mostrador simples (uso genérico).
+function updateSimpleGauge(id, rawValue, sensors) {
+    const cfg = sensors.find(s => s.id === id);
+    if (!cfg) return;
+    const valEl = document.getElementById(`val_${id}`);
+    const canvasEl = document.getElementById(`canvas_${id}`);
+    if (!valEl || !canvasEl) return;
+    valEl.textContent = rawValue.toFixed(2) + ' ' + cfg.unit;
+    drawGauge(canvasEl, rawValue, cfg.min, cfg.max, { isNeg: cfg.min < 0, label: cfg.unit });
+}
+
+// =============================================
+// CASCO 3D — SAMBAQUI (vista lateral + vista traseira)
+// Modelo: /static/sambaqui_model.js (CAD em mm: X = proa, Y = bombordo, Z = cima)
+// Cena three.js:                        X = proa, Y = cima,     Z = boreste
+// =============================================
+const HullView = (() => {
+    // ---- Parâmetros ajustáveis ----
+    const WATERLINE_MM = 200;   // altura da linha d'água sobre a linha de base do casco (ajuste ao calado real)
+    const PIVOT_X_MM   = 2800;  // ponto longitudinal em torno do qual o casco gira (≈ centro de gravidade)
+    const ELEV_DEG     = 7;     // elevação da câmera (0 = vista totalmente plana)
+    const MAX_ANGLE    = 45;    // limite do giro visual (graus)
+    const SCALE_RANGE  = 30;    // fundo de escala das réguas (±graus)
+
+    // Estilo "holograma": casco, convés e placas solares translúcidos para o motor e os
+    // componentes internos aparecerem. opacity < 1 => transparente; order = ordem de desenho.
+    const ROLE_STYLE = {
+        hull:     { color: 0x5dbad1, opacity: 0.34, order: 1 },
+        deck:     { color: 0x96cef2, opacity: 0.48, order: 2 },
+        panel:    { color: 0x1f5f8b, opacity: 0.62, order: 3 },    // placas solares
+        deckpart: { color: 0x7fa6b5, offset: true },
+        motor:    { color: 0xf2ae00 },
+        cooling:  { color: 0x3db3ae },
+        bat:      { color: 0x00a35a },                             // baterias
+        elec:     { color: 0x00a88a },                             // caixa elétrica
+        misc:     { color: 0x8c989d },
+    };
+    const EDGE_ROLES = { hull: 0.45, deck: 0.35, panel: 0.6 };      // opacidade das arestas
+
+    // ---- Configuração persistente (mapeamento dos eixos + tara) ----
+    let cfg = { invPitch: false, invRoll: false, swap: false, offP: 0, offR: 0 };
+    try { const s = localStorage.getItem('hullcfg'); if (s) Object.assign(cfg, JSON.parse(s)); } catch (e) {}
+    const saveCfg = () => { try { localStorage.setItem('hullcfg', JSON.stringify(cfg)); } catch (e) {} };
+
+    // ---- Estado dos ângulos (graus) ----
+    let raw = { p: 0, r: 0 };       // ângulo bruto do sensor (já com inversões)
+    let tgt = { p: 0, r: 0 };       // alvo (bruto - tara)
+    let cur = { p: 0, r: 0 };       // valor animado
+    let dirty = true, simTimer = null, simT = 0;
+    const views = [];
+
+    const $ = id => document.getElementById(id);
+    const rad = d => d * Math.PI / 180;
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+    // ---- Decodificação do modelo ----
+    function b64buf(b) {
+        const s = atob(b), u = new Uint8Array(s.length);
+        for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+        return u.buffer;
+    }
+    function buildLayers() {
+        return window.SAMBAQUI_MODEL.layers.map(L => {
+            const q = new Int16Array(b64buf(L.v));
+            const pos = new Float32Array(q.length);
+            for (let i = 0; i < q.length; i += 3) {            // CAD (X,Y,Z) -> three (X,Z,-Y)
+                pos[i] = q[i]; pos[i + 1] = q[i + 2]; pos[i + 2] = -q[i + 1];
+            }
+            const idx = L.w === 16 ? new Uint16Array(b64buf(L.f)) : new Uint32Array(b64buf(L.f));
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geo.setIndex(new THREE.BufferAttribute(idx, 1));
+            geo.computeVertexNormals();
+            return { role: L.r, geo, edges: EDGE_ROLES[L.r] ? new THREE.EdgesGeometry(geo, 28) : null };
+        });
+    }
+
+    let layers, mats, edgeMats, waterMat;
+    function buildShared() {
+        layers = buildLayers();
+        mats = {}; edgeMats = {};
+        for (const r in ROLE_STYLE) {
+            const s = ROLE_STYLE[r];
+            mats[r] = new THREE.MeshStandardMaterial({
+                color: s.color, metalness: 0.2, roughness: 0.55, side: THREE.DoubleSide,
+                transparent: s.opacity !== undefined, opacity: s.opacity !== undefined ? s.opacity : 1,
+                depthWrite: s.opacity === undefined,
+                polygonOffset: !!s.offset, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+            });
+            mats[r].userData.order = s.order || 0;
+            if (EDGE_ROLES[r]) edgeMats[r] = new THREE.LineBasicMaterial({
+                color: r === 'panel' ? 0x1f5f8b : 0x16807a, transparent: true, opacity: EDGE_ROLES[r], depthWrite: false,
+            });
+        }
+        waterMat = new THREE.MeshBasicMaterial({ color: 0x5dbad1, transparent: true, opacity: 0.30, depthWrite: false });
+    }
+
+    // ---- Uma vista (lateral ou traseira) ----
+    function makeView(canvas, kind) {
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setClearColor(0x000000, 0);
+
+        const scene = new THREE.Scene();
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x9fb8c2, 1.0));
+        const key = new THREE.DirectionalLight(0xffffff, 0.85); key.position.set(-3000, 5000, 4000); scene.add(key);
+        const fill = new THREE.DirectionalLight(0x96cef2, 0.35); fill.position.set(4000, 1000, -3000); scene.add(fill);
+
+        // pivot (gira) -> modelo (deslocado para que o pivot coincida com a linha d'água)
+        const pivot = new THREE.Group();
+        pivot.position.set(PIVOT_X_MM, WATERLINE_MM, 0);
+        scene.add(pivot);
+        const model = new THREE.Group();
+        model.position.set(-PIVOT_X_MM, -WATERLINE_MM, 0);
+        pivot.add(model);
+        for (const l of layers) {
+            const mesh = new THREE.Mesh(l.geo, mats[l.role]);
+            mesh.renderOrder = mats[l.role].userData.order;
+            model.add(mesh);
+            if (l.edges) {
+                const ln = new THREE.LineSegments(l.edges, edgeMats[l.role]);
+                ln.renderOrder = mesh.renderOrder;
+                model.add(ln);
+            }
+        }
+
+        // água: volume translúcido + grade na superfície (fixos no mundo)
+        const x0 = kind === 'side' ? -3000 : -300, x1 = 9000;
+        const water = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, 1600, 5000), waterMat);
+        water.position.set((x0 + x1) / 2, WATERLINE_MM - 800, 0);
+        water.renderOrder = 5;
+        scene.add(water);
+        const grid = new THREE.GridHelper(12000, 24, 0x3db3ae, 0x3db3ae);
+        grid.position.set(3000, WATERLINE_MM + 1, 0);
+        grid.material.transparent = true; grid.material.opacity = 0.28; grid.material.depthWrite = false;
+        grid.renderOrder = 6;
+        scene.add(grid);
+
+        // FOV estreito = pouca distorção de perspectiva (leitura do ângulo mais fiel)
+        const cam = new THREE.PerspectiveCamera(kind === 'side' ? 12 : 14, 1.6, 100, 80000);
+        const v = { kind, canvas, renderer, scene, cam, pivot };
+
+        v.layout = () => {
+            const w = Math.max(canvas.clientWidth, 1), h = Math.max(canvas.clientHeight, 1);
+            renderer.setSize(w, h, false);
+            cam.aspect = w / h;
+            const th = Math.tan(rad(cam.fov / 2));
+            const extW = kind === 'side' ? 6700 : 3300;
+            const extH = kind === 'side' ? 2700 : 2700;
+            const d = Math.max(extH / 2 / th, extW / 2 / (th * cam.aspect), 4000);
+            const e = rad(ELEV_DEG);
+            if (kind === 'side') {
+                const t = new THREE.Vector3(2993, 250, 0);
+                cam.position.set(t.x, t.y + d * Math.sin(e), t.z + d * Math.cos(e));      // olhando do boreste
+                cam.lookAt(t);
+            } else {
+                const t = new THREE.Vector3(1200, 250, 0);                                 // foco na popa / motor
+                cam.position.set(t.x - d * Math.cos(e), t.y + d * Math.sin(e), t.z);      // olhando da popa
+                cam.lookAt(t);
+            }
+            cam.updateProjectionMatrix();
+            dirty = true;
+        };
+        views.push(v);
+        return v;
+    }
+
+    // ---- HUD ----
+    function level(a) { a = Math.abs(a); return a < 2 ? 'ok' : a < 8 ? 'ac' : a < 15 ? 'warn' : 'bad'; }
+    function setHud(kind, a) {
+        const card = $(kind === 'pitch' ? 'card-pitch' : 'card-roll');
+        card.className = 'hull-card lv-' + level(a);
+        $(kind + '-val').textContent = (a > 0.05 ? '+' : a < -0.05 ? '−' : '') + Math.abs(a).toFixed(1) + '°';
+        let st = 'NIVELADO';
+        if (Math.abs(a) >= 1) {
+            st = kind === 'pitch' ? (a > 0 ? 'PROA ALTA' : 'PROA BAIXA')
+                                  : (a > 0 ? 'ADERNADO A BORESTE' : 'ADERNADO A BOMBORDO');
+        }
+        $(kind + '-state').textContent = st;
+        $(kind + '-mk').style.left = (50 + clamp(a, -SCALE_RANGE, SCALE_RANGE) / SCALE_RANGE * 50) + '%';
+    }
+    function buildScales() {
+        for (const k of ['pitch', 'roll']) {
+            const sc = $(k + '-scale');
+            for (let a = -SCALE_RANGE; a <= SCALE_RANGE; a += 10) {
+                const l = document.createElement('span');
+                l.className = 'lbl';
+                l.style.left = (50 + a / SCALE_RANGE * 50) + '%';
+                l.textContent = (a > 0 ? '+' : a < 0 ? '−' : '') + Math.abs(a) + '°';
+                sc.appendChild(l);
+            }
+        }
+    }
+
+    // ---- Entrada de dados ----
+    function setRaw(p, r) {
+        raw = { p, r };
+        tgt = { p: clamp(p - cfg.offP, -MAX_ANGLE, MAX_ANGLE), r: clamp(r - cfg.offR, -MAX_ANGLE, MAX_ANGLE) };
+        setHud('pitch', tgt.p);
+        setHud('roll', tgt.r);
+    }
+    // g do LSM6DS3 -> pitch (proa+ para cima) e roll (boreste+ para baixo)
+    // Premissa: X do sensor aponta para a proa, Z para cima, Y para bombordo (triedro direto).
+    // Se o sentido sair invertido, use os botões de inversão / troca de eixos.
+    function anglesFromG(x, y, z) {
+        let ax = x, ay = y;
+        if (cfg.swap) { ax = y; ay = x; }
+        let p = Math.atan2(-ax, Math.hypot(ay, z)) * 180 / Math.PI;
+        let r = Math.atan2(ay, z) * 180 / Math.PI;
+        if (cfg.invPitch) p = -p;
+        if (cfg.invRoll)  r = -r;
+        return { p, r };
+    }
+    function onG(x, y, z) {
+        if (simTimer) return;
+        $('g-x').textContent = x.toFixed(2);
+        $('g-y').textContent = y.toFixed(2);
+        $('g-z').textContent = z.toFixed(2);
+        const a = anglesFromG(x, y, z);
+        setRaw(a.p, a.r);
+    }
+
+    // ---- Botões ----
+    function syncButtons() {
+        $('btn-inv-pitch').classList.toggle('on', cfg.invPitch);
+        $('btn-inv-roll').classList.toggle('on', cfg.invRoll);
+        $('btn-swap').classList.toggle('on', cfg.swap);
+        $('btn-sim').classList.toggle('on', !!simTimer);
+    }
+    function wireButtons() {
+        $('btn-tare').onclick = () => { cfg.offP = raw.p; cfg.offR = raw.r; saveCfg(); setRaw(raw.p, raw.r); };
+        const flip = (id, key) => { $(id).onclick = () => {
+            cfg[key] = !cfg[key]; cfg.offP = 0; cfg.offR = 0; saveCfg(); syncButtons();
+        }; };
+        flip('btn-inv-pitch', 'invPitch');
+        flip('btn-inv-roll',  'invRoll');
+        flip('btn-swap',      'swap');
+        $('btn-sim').onclick = () => {
+            if (simTimer) { clearInterval(simTimer); simTimer = null; }
+            else simTimer = setInterval(() => {
+                simT += 0.1;
+                setRaw(9 * Math.sin(simT * 0.9), 14 * Math.sin(simT * 1.3 + 1));
+            }, 100);
+            syncButtons();
+        };
+        syncButtons();
+    }
+
+    // ---- Loop de animação (só redesenha quando algo muda) ----
+    function frame() {
+        requestAnimationFrame(frame);
+        const k = 0.08;
+        const dp = tgt.p - cur.p, dr = tgt.r - cur.r;
+        if (Math.abs(dp) > 0.01 || Math.abs(dr) > 0.01) {
+            cur.p += dp * k; cur.r += dr * k; dirty = true;
+        }
+        if (!dirty) return;
+        dirty = false;
+        for (const v of views) {
+            // cada card mostra só o seu eixo, para o enquadramento ficar estável:
+            //   lateral: pitch gira em Z (proa+ sobe) · traseira: roll gira em X (boreste+ desce)
+            if (v.kind === 'side') v.pivot.rotation.set(0, 0, rad(cur.p));
+            else                   v.pivot.rotation.set(rad(cur.r), 0, 0);
+            v.renderer.render(v.scene, v.cam);
+        }
+    }
+
+    function init() {
+        buildScales();
+        wireButtons();
+        setRaw(0, 0);
+        const stages = document.querySelectorAll('.hull-stage');
+        try {
+            if (typeof THREE === 'undefined' || !window.SAMBAQUI_MODEL) throw new Error('three.js ou modelo ausente');
+            buildShared();
+            makeView($('cv-side'), 'side');
+            makeView($('cv-rear'), 'rear');
+        } catch (e) {
+            console.error('HullView:', e);
+            stages.forEach(s => { const f = s.querySelector('.hull-fallback'); if (f) f.style.display = 'flex'; });
+            return;
+        }
+        const relayout = () => views.forEach(v => v.layout());
+        if (window.ResizeObserver) stages.forEach(s => new ResizeObserver(relayout).observe(s));
+        window.addEventListener('resize', relayout);
+        relayout();
+        frame();
+    }
+
+    return { init, onG, onAngles: (pitch, roll) => setRaw(pitch, roll) };
+})();
+
+// =============================================
+// ACELERÔMETRO -> CASCO 3D
+// =============================================
+// Repassa a aceleração (g) da IMU para o casco 3D.
+function onAccelUpdate(x, y, z) {
+    state.accel = { x, y, z };
+    HullView.onG(x, y, z);
+}
+
+// =============================================
+// SOCKET.IO, RENDERIZAÇÃO E MODO DEMO
+// =============================================
+const query = new URLSearchParams(window.location.search);
+// Modo demo: ?demo=1, arquivo aberto direto (Live Server) ou sem Socket.IO.
+const LIVE_SERVER_PREVIEW = window.location.pathname.endsWith('/templates/index.html');
+const DEMO_MODE = query.get('demo') === '1' || LIVE_SERVER_PREVIEW || typeof io !== 'function';
+const socket = !DEMO_MODE && typeof io === 'function' ? io() : null;
+
+// Indicador de conexão do cabeçalho (bolinha + texto).
+function setConnectionStatus(connected, label) {
+    document.getElementById('status-dot').classList.toggle('connected', connected);
+    document.getElementById('status-label').textContent = label;
+}
+
+if (socket) {
+    socket.on('connect', () => { setConnectionStatus(true, 'SOCKET OK'); socket.emit('request_snapshot'); });
+    socket.on('disconnect', () => setConnectionStatus(false, 'SOCKET OFF'));
+    socket.on('serial_status', status => setConnectionStatus(!!status.connected, status.connected ? `SERIAL ${status.detail}` : 'SERIAL OFF'));
+}
+
+// Mostra "--" na atitude do casco quando a IMU não tem dado.
+function setTiltUnavailable() {
+    ['pitch', 'roll'].forEach(kind => {
+        document.getElementById(`${kind}-val`).textContent = '--';
+        document.getElementById(`${kind}-state`).textContent = 'SEM DADOS';
+    });
+    ['g-x', 'g-y', 'g-z'].forEach(id => document.getElementById(id).textContent = '--');
+}
+
+// Ponto central: desenha um snapshot inteiro (vindo do servidor ou do demo).
+// [NOVO SENSOR] Um bloco novo do snapshot precisa de uma chamada aqui.
+function renderSnapshot(snapshot, includeTrack = false) {
+    state.latest = snapshot;
+    renderTemperatures(snapshot.temperatures || []);
+    renderMetrics(snapshot);
+    renderFlows(snapshot);
+    MapView.setPosition(snapshot.gps || {});
+    if (includeTrack && snapshot.gps && snapshot.gps.track) MapView.setTrack(snapshot.gps.track);
+    const imu = snapshot.imu || {};
+    if (imu.valid && imu.accel_g && Number.isFinite(imu.accel_g.x) && Number.isFinite(imu.accel_g.y) && Number.isFinite(imu.accel_g.z)) {
+        onAccelUpdate(imu.accel_g.x, imu.accel_g.y, imu.accel_g.z);
+    } else if (imu.valid && Number.isFinite(imu.pitch_deg) && Number.isFinite(imu.roll_deg)) {
+        HullView.onAngles(imu.pitch_deg, imu.roll_deg);
+    } else {
+        setTiltUnavailable();
+    }
+    renderKpis(snapshot);
+    document.getElementById('loop-time-header').textContent = snapshot.sequence == null ? '--' : `#${snapshot.sequence}`;
+}
+
+if (socket) {
+    socket.on('telemetry_update', snapshot => renderSnapshot(snapshot));
+    socket.on('telemetry_snapshot', snapshot => renderSnapshot(snapshot, true));
+    socket.on('gps_track_point', point => MapView.addPoint(point));
+}
+
+// Snapshot simulado no formato do schema 3 (só para demonstração).
+function demoSnapshot(tick) {
+    const phase = tick / 8;
+    const pitch = 6 * Math.sin(phase);
+    const roll = 4 * Math.cos(phase * 0.8);
+    // Trajeto demo a ~10 nós (raio ≈ 670 m, uma volta a cada ~12 min).
+    const course = tick / 120;
+    const point = { lat: -26.25 + 0.006 * Math.sin(course), lng: -48.65 + 0.0067 * Math.cos(course) };
+    state.mapTrack.push(point);
+    if (state.mapTrack.length > 180) state.mapTrack.shift();
+    const flowA = 4.2 + Math.sin(phase) * .5;
+    const flowB = 5.1 + Math.cos(phase * 1.2) * .4;
+    const powerA = 96 + Math.sin(phase) * 12;
+    const powerB = 142 + Math.cos(phase) * 15;
+    const powerC = 120 + Math.sin(phase * 0.7) * 14;
+    const motorCurrent = 24 + Math.sin(phase / 2) * 4;
+    return {
+        schema_version: 3,
+        sequence: tick,
+        timestamp_ms: tick * 1000,
+        channels: [
+            { id: 'mppt_a', label: 'MPPT A', voltage_v: 48.0, current_a: powerA / 48, power_w: powerA, energy_wh: tick * .026, flow_l_min: flowA, valid_flags: 0x10 },
+            { id: 'mppt_b', label: 'MPPT B', voltage_v: 49.0, current_a: powerB / 49, power_w: powerB, energy_wh: tick * .039, flow_l_min: flowB, valid_flags: 0x10 },
+            { id: 'mppt_c', label: 'MPPT C', voltage_v: 50.5, current_a: powerC / 50.5, power_w: powerC, energy_wh: tick * .03, flow_l_min: null, valid_flags: 0x0f },
+            { id: 'battery', label: 'BATERIA', voltage_v: 50.8, current_a: motorCurrent - (powerA + powerB + powerC) / 50.8, power_w: 50.8 * motorCurrent - (powerA + powerB + powerC), energy_wh: tick * .02, flow_l_min: null, valid_flags: 0x0f },
+        ],
+        temperatures: [12, 24, 50, 28, 8, 48, 26, 55, 18, 32].map((value, index) => value + Math.sin(phase + index) * .6),
+        gps: { valid: true, latitude: point.lat, longitude: point.lng, hdop: 1.1, satellites: 9, fix_quality: 1, track: state.mapTrack.slice() },
+        imu: { valid: true, accel_g: { x: -Math.sin(pitch * Math.PI / 180), y: Math.sin(roll * Math.PI / 180), z: .98 }, pitch_deg: pitch, roll_deg: roll },
+        link: { rssi_dbm: -70, snr_db: 7.3, sequence_lost: 0 },
+        // Campos ainda não presentes no payload Rev B: só o modo demo os preenche.
+        motor: { valid: true, rpm: 1450 + Math.sin(phase) * 120, temperature_c: 46 + Math.sin(phase / 2) * 3, input_current_a: motorCurrent, input_voltage_v: 50.6 },
+        battery_state: { soc_pct: 78 - tick * 0.01, soc_source: 'coulomb' },
+        error_flags: 0,
+    };
+}
+
+// Liga o modo demo: um snapshot simulado por segundo.
+function startDemoMode() {
+    if (!DEMO_MODE) return;
+    setConnectionStatus(true, 'MODO DEMO');
+    let tick = 0;
+    const update = () => renderSnapshot(demoSnapshot(tick++), true);
+    update();
+    window.setInterval(update, 1000);
+}
+
+// =============================================
+// INICIALIZAÇÃO DA PÁGINA
+// =============================================
+buildTempCards();
+buildMetricCards();
+buildFlowCards();
+MapView.init();
+
+HullView.init();
+setTiltUnavailable();
+startDemoMode();
+</script>
+</body>
+</html>

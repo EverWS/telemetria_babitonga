@@ -1,0 +1,15 @@
+# Arduino CLI build outputs
+**/build/
+
+# Python caches
+**/__pycache__/
+*.py[cod]
+
+# Local tooling/cache files
+.arduino15/
+.pytest_cache/
+
+# Material local que não é publicado neste repositório
+docs/
+CLAUDE.md
+.claude/

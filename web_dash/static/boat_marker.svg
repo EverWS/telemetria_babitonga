@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Embarcação">
+  <defs>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <path d="M32 4 L48 42 L41 54 L23 54 L16 42 Z" fill="#0a1826" stroke="#00d4ff" stroke-width="2.5" filter="url(#glow)"/>
+  <path d="M32 12 L39 39 L32 46 L25 39 Z" fill="#6fb3e0" fill-opacity=".72" stroke="#c8e6f5" stroke-width="1.5"/>
+  <path d="M22 46 Q32 53 42 46 L38 56 L26 56 Z" fill="#00ff9d" fill-opacity=".72" stroke="#00d4ff" stroke-width="1.5"/>
+  <circle cx="32" cy="31" r="3" fill="#ffc107" stroke="#050d14" stroke-width="1"/>
+</svg>
